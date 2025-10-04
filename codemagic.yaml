@@ -6,10 +6,11 @@ workflows:
     environment:
       xcode: 16.4
       groups:
-        - appstore_connect   # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
+        - appstore_connect      # ISSUER_ID, KEY_IDENTIFIER, PRIVATE_KEY
+        - signing               # CERT_P12 (+ CERT_PASSWORD если есть)
       vars:
         XCODE_PROJECT: "GrainFlow.xcodeproj"
-        XCODE_WORKSPACE: "GrainFlow.xcworkspace"   # будет использован, если есть Podfile
+        XCODE_WORKSPACE: "GrainFlow.xcworkspace"
         XCODE_SCHEME: "GrainFlow"
         BUNDLE_ID: "com.GrainFlow.hamzimdin"
         EXPORT_METHOD: "app-store"
@@ -31,22 +32,29 @@ workflows:
           set -euo pipefail
           agvtool new-version -all "$(date +%y%m%d%H%M)"
 
-      - name: Automatic code signing via App Store Connect (compat mode)
+      - name: Import Distribution p12 into keychain
         script: |
           set -euo pipefail
           keychain initialize
-          # Создаст недостающие provisioning profiles для BUNDLE_ID
-          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create
-          # Установит доступные сертификаты в кейчейн (если они есть в аккаунте)
-          keychain add-certificates
+          if [ -n "${CERT_P12:-}" ]; then
+            echo "$CERT_P12" | base64 --decode > dist.p12
+            if [ -n "${CERT_PASSWORD:-}" ]; then
+              keychain add-certificates --certificate dist.p12 --certificate-password "$CERT_PASSWORD"
+            else
+              keychain add-certificates --certificate dist.p12
+            fi
+          else
+            echo "No CERT_P12 provided; trying to import from Codemagic Code signing identities..."
+            keychain add-certificates || { echo "No certificate found. Add CERT_P12 secret or upload a p12 in Codemagic UI."; exit 1; }
+          fi
           echo "== Code signing identities =="
           security find-identity -v -p codesigning || true
-          # Явно подскажем, если нет ни одного дистрибутивного сертификата
-          if ! security find-identity -v -p codesigning | grep -q "Apple Distribution"; then
-            echo "ERROR: No 'Apple Distribution' certificate found in keychain."
-            echo "Create one once in Apple Developer portal (Certificates → + → Apple Distribution) and re-run."
-            exit 1
-          fi
+          security find-identity -v -p codesigning | grep -q "Apple Distribution" || { echo "ERROR: Apple Distribution identity not present"; exit 1; }
+
+      - name: Auto-provision profiles for the bundle id
+        script: |
+          set -euo pipefail
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create
 
       - name: Build IPA (Xcode automatic signing)
         script: |
@@ -68,4 +76,3 @@ workflows:
         key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
         issuer_id: $APP_STORE_CONNECT_ISSUER_ID
         submit_to_testflight: true
-
