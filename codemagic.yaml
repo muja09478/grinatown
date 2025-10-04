@@ -54,67 +54,37 @@ workflows:
           mkdir -p "$PROFILES_DIR"
 
           echo "Fetching IOS_DISTRIBUTION certificate id from portal…"
-          CERT_ID=$(app-store-connect certificates list --type IOS_DISTRIBUTION --json \
-            | python3 -c 'import sys,json; d=json.load(sys.stdin); items=d["data"] if isinstance(d,dict) and "data" in d else (d if isinstance(d,list) else []); print(next((c.get("id") for c in items if isinstance(c,dict) and "DISTRIBUTION" in ((c.get("attributes",{}) or {}).get("certificateType") or c.get("certificateType") or "").upper()), ""), end="")')
+          CERTS_JSON=$(app-store-connect certificates list --type IOS_DISTRIBUTION --json || true)
+          case "$(printf '%s' "$CERTS_JSON" | head -c1)" in
+            "{"|"[") : ;;
+            *) echo "Certificates list not JSON, got:"; echo "$CERTS_JSON"; exit 1 ;;
+          esac
+          CERT_ID=$(printf '%s' "$CERTS_JSON" | python3 -c 'import sys,json
+d=json.load(sys.stdin)
+items=d["data"] if isinstance(d,dict) and "data" in d else (d if isinstance(d,list) else [])
+cid=""
+for c in items:
+    if not isinstance(c,dict): continue
+    a=c.get("attributes",{}) or {}
+    t=(a.get("certificateType") or c.get("certificateType") or "").upper()
+    if "DISTRIBUTION" in t:
+        cid=c.get("id") or ""
+        if cid: break
+print(cid,end="")')
           [ -n "$CERT_ID" ] || { echo "Could not obtain IOS_DISTRIBUTION cert id from portal"; exit 1; }
           echo "Using cert id: $CERT_ID"
 
           echo "Resolving Bundle ID resource id for ${BUNDLE_ID}…"
-          BUNDLE_DBID=$(app-store-connect bundle-ids list --identifier "$BUNDLE_ID" --json \
-            | python3 -c 'import sys,json; d=json.load(sys.stdin); items=d["data"] if isinstance(d,dict) and "data" in d else (d if isinstance(d,list) else []); print(next((x.get("id") for x in items if isinstance(x,dict)), ""), end="")')
-          [ -n "$BUNDLE_DBID" ] || { echo "Bundle ID ${BUNDLE_ID} not found in Developer portal"; exit 1; }
-          echo "Bundle resource id: $BUNDLE_DBID"
-
-          echo "Creating/downloading App Store provisioning profile…"
-          set +e
-          app-store-connect profiles create \
-            --type IOS_APP_STORE \
-            --bundle-id "$BUNDLE_ID" \
-            --certificate-ids "$CERT_ID" \
-            --name "CM_${BUNDLE_ID}_$(date +%Y%m%d%H%M)" \
-            --save \
-            --profiles-dir "$PROFILES_DIR" 2>create_err.txt
-          RET=$?
-          if [ $RET -ne 0 ] && grep -q 'unrecognized arguments: --bundle-id' create_err.txt; then
-            echo "CLI does not accept --bundle-id, retrying with --bundle-id-id…"
-            app-store-connect profiles create \
-              --type IOS_APP_STORE \
-              --bundle-id-id "$BUNDLE_DBID" \
-              --certificate-ids "$CERT_ID" \
-              --name "CM_${BUNDLE_ID}_$(date +%Y%m%d%H%M)" \
-              --save \
-              --profiles-dir "$PROFILES_DIR"
-            RET=$?
-          fi
-          set -e
-          [ $RET -eq 0 ] || { echo "Failed to create/download provisioning profile"; cat create_err.txt || true; exit 1; }
-
-          PROFILE_PATH=$(ls -t "$PROFILES_DIR"/*.mobileprovision | head -n1)
-          test -s "$PROFILE_PATH"
-
-          PL=$(/usr/bin/security cms -D -i "$PROFILE_PATH")
-          UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' /dev/stdin <<< "$PL")
-          TEAM_ID=$(/usr/libexec/PlistBuddy -c 'Print TeamIdentifier:0' /dev/stdin <<< "$PL")
-          echo "PROFILE_UUID=$UUID" >> "$CM_ENV"
-          echo "TEAM_ID=$TEAM_ID"   >> "$CM_ENV"
-          echo "Using profile UUID: $UUID, team: $TEAM_ID"
-
-          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
-          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
-
-      - name: Build IPA (manual signing)
-        script: |
-          set -euo pipefail
-          ARCHIVE_PATH="$CM_BUILD_DIR/GrainFlow.xcarchive"
-          EXPORT_PATH="$CM_EXPORT_DIR"
-
-          cat > exportOptions.plist <<EOI
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-            <key>method</key><string>${EXPORT_METHOD}</string>
-            <key>teamID</key><string>${TEAM_ID}</string>
-            <key>signingStyle</key><string>manual</string>
-            <key>provisioningProfiles</key><dict>
-              <key>${BUNDLE_ID}</key><string>${PROFILE_UUID}</string>
-            </d
+          BUNDLES_JSON=$(app-store-connect bundle-ids list --json || true)
+          case "$(printf '%s' "$BUNDLES_JSON" | head -c1)" in
+            "{"|"[") : ;;
+            *) echo "Bundle-ids list not JSON, got:"; echo "$BUNDLES_JSON"; exit 1 ;;
+          esac
+          BUNDLE_DBID=$(printf '%s' "$BUNDLES_JSON" | BUNDLE_ID="$BUNDLE_ID" python3 -c 'import sys,os,json
+bid=os.environ.get("BUNDLE_ID"); d=json.load(sys.stdin)
+items=d["data"] if isinstance(d,dict) and "data" in d else (d if isinstance(d,list) else [])
+rid=""
+for x in items:
+    if not isinstance(x,dict): continue
+    a=x.get("attributes",{}) or {}
+    ident=a.get("identifier") or x.get("identifier") or ""
