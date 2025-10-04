@@ -54,28 +54,12 @@ workflows:
           mkdir -p "$PROFILES_DIR"
 
           echo "Fetching IOS_DISTRIBUTION certificate id from portal…"
-          CERT_ID=$(app-store-connect certificates list --type IOS_DISTRIBUTION --json | python3 - <<'PY'
-import sys, json
-d = json.load(sys.stdin)
-items = d['data'] if isinstance(d, dict) and 'data' in d else (d if isinstance(d, list) else [])
-cid = ''
-for c in items:
-    if not isinstance(c, dict):
-        continue
-    a = c.get('attributes', {}) or {}
-    t = (a.get('certificateType') or c.get('certificateType') or '').upper()
-    if 'DISTRIBUTION' in t:
-        cid = c.get('id') or ''
-        if cid:
-            break
-print(cid, end='')
-PY
-)
+          CERT_ID=$(app-store-connect certificates list --type IOS_DISTRIBUTION --json \
+            | python3 -c 'import sys,json; d=json.load(sys.stdin); items=d["data"] if isinstance(d,dict) and "data" in d else (d if isinstance(d,list) else []); print(next((c.get("id") for c in items if isinstance(c,dict) and "DISTRIBUTION" in ((c.get("attributes",{}) or {}).get("certificateType") or c.get("certificateType") or "").upper()), ""), end="")')
           [ -n "$CERT_ID" ] || { echo "Could not obtain IOS_DISTRIBUTION cert id from portal"; exit 1; }
           echo "Using cert id: $CERT_ID"
 
           echo "Creating/downloading App Store provisioning profile for ${BUNDLE_ID}…"
-          # Создаст профиль (если нет) или скачает существующий в PROFILES_DIR
           app-store-connect profiles create \
             --type IOS_APP_STORE \
             --bundle-id "$BUNDLE_ID" \
