@@ -7,21 +7,21 @@ workflows:
       groups:
         - appstore_connect   # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
       vars:
-        CERT_PASSWORD: "set-strong-password-here"   # потом перенеси в Secrets
+        CERT_PASSWORD: "set-strong-password-here"   # после прогонa перенеси в Secrets
     scripts:
-      - name: Generate private key
+      - name: Generate PKCS#8 private key
         script: |
           set -euo pipefail
-          # создаём ключ без парольной фразы (проще для CI)
-          openssl genrsa -out dist.key 2048
+          # PKCS#1 -> PKCS#8 (нужен формат с заголовком BEGIN PRIVATE KEY)
+          openssl genrsa -out dist_pkcs1.key 2048
+          openssl pkcs8 -topk8 -in dist_pkcs1.key -nocrypt -out dist.key
 
-      - name: Create iOS Distribution cert via API and package into p12
+      - name: Create iOS Distribution cert and package into p12
         script: |
           set -euo pipefail
-          # В твоей версии CLI нужен тип IOS_DISTRIBUTION и ключ, а не CSR
           app-store-connect certificates create \
             --type IOS_DISTRIBUTION \
-            --certificate-key dist.key \
+            --certificate-key "$(cat dist.key)" \
             --p12-password "$CERT_PASSWORD" \
             --p12-path dist.p12 \
             --save
