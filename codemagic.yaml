@@ -1,38 +1,28 @@
 workflows:
   ios_appstore_manual_signing:
-    name: iOS App Store Manual signing (GrainFlow)
+    name: iOS App Store Manual signing
     max_build_duration: 60
 
     environment:
-      xcode: 16.4
       groups:
-        - signing            # CERTIFICATE_P12, CERTIFICATE_PASSWORD (optional), MOBILEPROVISION (base64)
+        - signing            # CERTIFICATE_P12, CERTIFICATE_PASSWORD, MOBILEPROVISION
         - appstore_connect   # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
       vars:
         XCODE_PROJECT: "GrainFlow.xcodeproj"
         XCODE_SCHEME: "GrainFlow"
         BUNDLE_ID: "com.GrainFlow.hamzimdin"
-        TEAM_ID: "OVERRIDE_BY_PROFILE"   # будет заменён значением из профиля
+        TEAM_ID: "OVERRIDE_BY_PROFILE"   # будет заменён на значение из профиля
         EXPORT_METHOD: "app-store"
 
     scripts:
-      - name: Install dependencies (CocoaPods if present)
-        script: |
-          set -euo pipefail
-          if [ -f "Podfile" ]; then
-            gem install cocoapods --no-document
-            pod install
-          fi
-
-      - name: Import certificate and provisioning profile
+      - name: Import certificate and profile
         script: |
           set -euo pipefail
 
-          # Секреты -> файлы
           echo "$CERTIFICATE_P12" | base64 --decode > cert.p12
           echo "$MOBILEPROVISION" | base64 --decode > profile.mobileprovision
 
-          # Кейчейн + p12
+          # Keychain + certificate
           keychain initialize
           if [ -n "${CERTIFICATE_PASSWORD:-}" ]; then
             keychain add-certificates --certificate cert.p12 --certificate-password "$CERTIFICATE_PASSWORD"
@@ -40,7 +30,7 @@ workflows:
             keychain add-certificates --certificate cert.p12
           fi
 
-          # Ставим профиль, читаем UUID и TeamIdentifier
+          # Install provisioning profile and read UUID + TeamIdentifier
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
           PROFILE_PLIST="$(security cms -D -i profile.mobileprovision)"
           PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' /dev/stdin <<< "$PROFILE_PLIST")
@@ -50,46 +40,44 @@ workflows:
           echo "Using Provisioning Profile UUID: $PROFILE_UUID"
           echo "TeamIdentifier from profile: $PROFILE_TEAM_ID"
 
-          # Экспортим для следующих шагов
+          # export to env for next steps
           echo "PROFILE_UUID=$PROFILE_UUID" >> "$CM_ENV"
           echo "TEAM_ID=$PROFILE_TEAM_ID"   >> "$CM_ENV"
 
-          # Определим корректное имя сертификата подписи (Apple Distribution или iPhone Distribution)
-          DIST_IDENTITY=$(security find-identity -v -p codesigning | \
-            sed -nE 's/.*"((Apple|iPhone) Distribution:.*)"/\1/p' | head -n1 || true)
-          if [ -z "$DIST_IDENTITY" ]; then
-            echo "ERROR: Distribution identity not found in keychain"; security find-identity -v -p codesigning || true; exit 1
-          fi
-          echo "DIST_IDENTITY=$DIST_IDENTITY" >> "$CM_ENV"
-          echo "Using signing identity: $DIST_IDENTITY"
+          # Diagnostics (не ломают билд)
+          echo "== Code signing identities in keychain =="
+          security find-identity -v -p codesigning || true
 
-          # Диагностика (не ломает билд)
-          echo "== Code signing identities in keychain =="; security find-identity -v -p codesigning || true
-
-          # Готовим exportOptions.plist (manual)
+          # Valid exportOptions.plist (XML)
           cat > exportOptions.plist <<EOI
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-            <key>method</key><string>${EXPORT_METHOD}</string>
-            <key>teamID</key><string>${TEAM_ID}</string>
-            <key>signingStyle</key><string>manual</string>
+            <key>method</key>
+            <string>${EXPORT_METHOD}</string>
+            <key>teamID</key>
+            <string>${PROFILE_TEAM_ID}</string>
+            <key>signingStyle</key>
+            <string>manual</string>
             <key>provisioningProfiles</key>
             <dict>
-              <key>${BUNDLE_ID}</key><string>${PROFILE_UUID}</string>
+              <key>${BUNDLE_ID}</key>
+              <string>${PROFILE_UUID}</string>
             </dict>
-            <key>stripSwiftSymbols</key><true/>
-            <key>destination</key><string>export</string>
+            <key>compileBitcode</key>
+            <false/>
+            <key>stripSwiftSymbols</key>
+            <true/>
           </dict>
           </plist>
           EOI
           /usr/bin/plutil -lint exportOptions.plist
 
-          # Прописать профиль в проект (manual signing)
+          # Apply profile into the project for manual signing
           xcode-project use-profiles --project "$XCODE_PROJECT" --export-options-plist exportOptions.plist
 
-      - name: Archive and export IPA (xcodebuild, manual signing)
+      - name: Archive and export IPA (xcodebuild)
         script: |
           set -euo pipefail
 
@@ -106,7 +94,7 @@ workflows:
             DEVELOPMENT_TEAM="$TEAM_ID" \
             CODE_SIGN_STYLE=Manual \
             PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
-            CODE_SIGN_IDENTITY="$DIST_IDENTITY" \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
             COMPILER_INDEX_STORE_ENABLE=NO
 
           echo "Exporting IPA to: $EXPORT_PATH"
@@ -118,13 +106,13 @@ workflows:
           echo "Export dir listing:"
           ls -lah "$EXPORT_PATH" || true
 
-          # Упадём явно, если .ipa не создана
+          # Упадём явно, если .ipa не создана (чтобы не было 'No artifacts were found')
           test -e "$EXPORT_PATH"/*.ipa
 
     artifacts:
       - $CM_EXPORT_DIR/*.ipa
       - $CM_EXPORT_DIR/*.dSYM.zip
-      - $CM_EXPORT_DIR/*.xcarchive
+      - $CM_BUILD_DIR/*.xcarchive
 
     publishing:
       app_store_connect:
