@@ -29,6 +29,7 @@ workflows:
       - name: Prepare artifact for Secrets (base64)
         script: |
           set -euo pipefail
-          base64 dist.p12 > dist.p12.b64
+          base64 < dist.p12 > dist.p12.b64
     artifacts:
       - dist.p12.b64
+
