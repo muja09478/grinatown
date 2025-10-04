@@ -1,31 +1,34 @@
 workflows:
   bootstrap_signing:
-    name: Bootstrap signing (one-time)
+    name: Bootstrap signing (create iOS Distribution p12 once)
+    max_build_duration: 10
     environment:
       xcode: 16.4
       groups:
-        - appstore_connect
+        - appstore_connect   # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
       vars:
-        CERT_PASSWORD: "set-a-strong-password"   # временно, потом в Secrets
+        CERT_PASSWORD: "set-strong-password-here"   # потом перенеси в Secrets
     scripts:
-      - name: Generate key + CSR
+      - name: Generate private key
         script: |
           set -euo pipefail
+          # создаём ключ без парольной фразы (проще для CI)
           openssl genrsa -out dist.key 2048
-          # Укажи любой CN/email (не критично)
-          openssl req -new -key dist.key -out dist.csr -subj "/CN=Apple Distribution/emailAddress=noreply@example.com"
 
-      - name: Create Apple Distribution via API
+      - name: Create iOS Distribution cert via API and package into p12
         script: |
           set -euo pipefail
-          # В разных версиях CLI синтаксис отличается. Попробуй по очереди:
-          app-store-connect certificates create --type APPLE_DISTRIBUTION --csr-file dist.csr --output ios_distribution.cer || \
-          app-store-connect certificates create --type IOS_DISTRIBUTION --csr-file dist.csr --output ios_distribution.cer
+          # В твоей версии CLI нужен тип IOS_DISTRIBUTION и ключ, а не CSR
+          app-store-connect certificates create \
+            --type IOS_DISTRIBUTION \
+            --certificate-key dist.key \
+            --p12-password "$CERT_PASSWORD" \
+            --p12-path dist.p12 \
+            --save
 
-      - name: Make PKCS#12 (p12) and base64 for Secrets
+      - name: Prepare artifact for Secrets (base64)
         script: |
           set -euo pipefail
-          openssl pkcs12 -export -inkey dist.key -in ios_distribution.cer -out dist.p12 -passout pass:"$CERT_PASSWORD"
           base64 dist.p12 > dist.p12.b64
     artifacts:
       - dist.p12.b64
