@@ -20,11 +20,14 @@ workflows:
         script: |
           set -euo pipefail
           if [ -f "Podfile" ]; then
+            echo "Installing CocoaPods dependencies..."
             gem install cocoapods --no-document
             pod install
-            echo 'BUILD_TARGET=--workspace "GrainFlow.xcworkspace"' >> "$CM_ENV"
+            echo "BUILD_TARGET=--workspace \"GrainFlow.xcworkspace\"" >> "$CM_ENV"
+            echo "Using workspace for build"
           else
-            echo 'BUILD_TARGET=--project "GrainFlow.xcodeproj"' >> "$CM_ENV"
+            echo "BUILD_TARGET=--project \"GrainFlow.xcodeproj\"" >> "$CM_ENV"
+            echo "Using project for build"
           fi
 
       - name: Bump build number
@@ -47,63 +50,40 @@ workflows:
           security find-identity -v -p codesigning | grep -E -q "Apple Distribution|iPhone Distribution" \
             || { echo "ERROR: distribution identity not found in keychain"; exit 1; }
 
-      - name: Ensure App Store provisioning profile for bundle id
-        script: |
-          set -euo pipefail
-          PROFILES_DIR="$CM_BUILD_DIR/profiles"
-          mkdir -p "$PROFILES_DIR"
-
-          echo "Fetching IOS_DISTRIBUTION certificate id from portal…"
-          CERTS_JSON=$(app-store-connect certificates list --type IOS_DISTRIBUTION --json || true)
-          case "$(printf '%s' "$CERTS_JSON" | head -c1)" in
-            "{"|"[") : ;;
-            *) echo "Certificates list not JSON, got:"; echo "$CERTS_JSON"; exit 1 ;;
-          esac
-          CERT_ID=$(printf '%s' "$CERTS_JSON" | python3 -c 'import sys,json
-          d=json.load(sys.stdin)
-          items=d["data"] if isinstance(d,dict) and "data" in d else (d if isinstance(d,list) else [])
-          cid=""
-          for c in items:
-              if not isinstance(c,dict): continue
-              a=c.get("attributes",{}) or {}
-              t=(a.get("certificateType") or c.get("certificateType") or "").upper()
-              if "DISTRIBUTION" in t:
-                  cid=c.get("id") or ""
-                  if cid: break
-          print(cid,end="")')
-          [ -n "$CERT_ID" ] || { echo "Could not obtain IOS_DISTRIBUTION cert id from portal"; exit 1; }
-          echo "Using cert id: $CERT_ID"
-
-          echo "Resolving Bundle ID resource id for ${BUNDLE_ID}…"
-          BUNDLES_JSON=$(app-store-connect bundle-ids list --json || true)
-          case "$(printf '%s' "$BUNDLES_JSON" | head -c1)" in
-            "{"|"[") : ;;
-            *) echo "Bundle-ids list not JSON, got:"; echo "$BUNDLES_JSON"; exit 1 ;;
-          esac
-          BUNDLE_DBID=$(printf '%s' "$BUNDLES_JSON" | BUNDLE_ID="$BUNDLE_ID" python3 -c 'import sys,os,json
-          bid=os.environ.get("BUNDLE_ID")
-          d=json.load(sys.stdin)
-          items=d["data"] if isinstance(d,dict) and "data" in d else (d if isinstance(d,list) else [])
-          rid=""
-          for x in items:
-              if not isinstance(x,dict): continue
-              a=x.get("attributes",{}) or {}
-              ident=a.get("identifier") or x.get("identifier") or ""
-              if ident == bid:
-                  rid=x.get("id") or ""
-                  if rid: break
-          print(rid,end="")')
-          [ -n "$BUNDLE_DBID" ] || { echo "Could not find Bundle ID $BUNDLE_ID in portal"; exit 1; }
-          echo "Bundle ID resource id: $BUNDLE_DBID"
-
       - name: Build and export .ipa
         script: |
           set -euo pipefail
-          source "$CM_ENV"
-          xcode-project build-archive \
+          
+          # Загружаем переменные из предыдущих шагов
+          if [ -f "$CM_ENV" ]; then
+            source "$CM_ENV"
+          fi
+          
+          # Проверяем, установлена ли переменная BUILD_TARGET
+          if [ -z "${BUILD_TARGET:-}" ]; then
+            echo "BUILD_TARGET not set, determining automatically..."
+            if [ -f "Podfile" ] && [ -d "$XCODE_WORKSPACE" ]; then
+              BUILD_TARGET="--workspace \"$XCODE_WORKSPACE\""
+              echo "Using workspace: $BUILD_TARGET"
+            else
+              BUILD_TARGET="--project \"$XCODE_PROJECT\""
+              echo "Using project: $BUILD_TARGET"
+            fi
+          fi
+          
+          echo "Building with target: $BUILD_TARGET"
+          echo "Scheme: $XCODE_SCHEME"
+          
+          # Создаем директорию для сборки
+          mkdir -p "$CM_BUILD_DIR/build"
+          
+          # Сборка архива
+          eval "xcode-project build-archive \
             $BUILD_TARGET \
-            --scheme "$XCODE_SCHEME" \
-            --output "$CM_BUILD_DIR/build/$XCODE_SCHEME.xcarchive"
+            --scheme \"$XCODE_SCHEME\" \
+            --output \"$CM_BUILD_DIR/build/$XCODE_SCHEME.xcarchive\""
+          
+          # Экспорт IPA
           xcode-project export-archive \
             --archive-path "$CM_BUILD_DIR/build/$XCODE_SCHEME.xcarchive" \
             --output "$CM_BUILD_DIR/build" \
@@ -114,5 +94,10 @@ workflows:
           set -euo pipefail
           IPA_PATH=$(find "$CM_BUILD_DIR/build" -name "*.ipa" | head -1)
           [ -n "$IPA_PATH" ] || { echo "No .ipa found in build dir"; exit 1; }
+          echo "Found IPA: $IPA_PATH"
+          
+          echo "Available apps in App Store Connect:"
           app-store-connect apps list --json
+          
+          echo "Uploading to App Store Connect..."
           app-store-connect upload "$IPA_PATH"
