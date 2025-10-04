@@ -54,19 +54,21 @@ workflows:
           echo "Directory contents:"
           ls -la
           
-          # Определяем тип проекта
+          # Определяем тип проекта и собираем IPA
           if [ -f "Podfile" ] && [ -d "GrainFlow.xcworkspace" ]; then
             echo "Building with workspace..."
-            xcode-project build-archive \
+            xcode-project build-ipa \
               --workspace "GrainFlow.xcworkspace" \
               --scheme "$XCODE_SCHEME" \
-              --output "build/GrainFlow.xcarchive"
+              --output "build" \
+              --export-method "$EXPORT_METHOD"
           elif [ -d "GrainFlow.xcodeproj" ]; then
             echo "Building with project..."
-            xcode-project build-archive \
+            xcode-project build-ipa \
               --project "GrainFlow.xcodeproj" \
               --scheme "$XCODE_SCHEME" \
-              --output "build/GrainFlow.xcarchive"
+              --output "build" \
+              --export-method "$EXPORT_METHOD"
           else
             echo "ERROR: No project or workspace found!"
             echo "Available files:"
@@ -74,11 +76,9 @@ workflows:
             exit 1
           fi
           
-          # Экспорт IPA
-          xcode-project export-archive \
-            --archive-path "build/GrainFlow.xcarchive" \
-            --output "build" \
-            --export-method "$EXPORT_METHOD"
+          echo "Build completed successfully!"
+          echo "Build directory contents:"
+          find "build" -type f
 
       - name: Deploy to App Store Connect
         script: |
@@ -91,4 +91,5 @@ workflows:
             exit 1
           fi
           echo "Found IPA: $IPA_PATH"
+          echo "Uploading to App Store Connect..."
           app-store-connect upload "$IPA_PATH"
