@@ -34,28 +34,28 @@ workflows:
 
       - name: Import Distribution p12 into keychain
         script: |
-    set -euo pipefail
-    keychain initialize
-    if [ -n "${CERT_P12:-}" ]; then
-      echo "$CERT_P12" | base64 --decode > dist.p12
-      if [ -n "${CERT_PASSWORD:-}" ]; then
-        keychain add-certificates --certificate dist.p12 --certificate-password "$CERT_PASSWORD"
-      else
-        keychain add-certificates --certificate dist.p12
-      fi
-    else
-      echo "No CERT_P12 provided; trying Codemagic identities..."
-      keychain add-certificates || { echo "No certificate found. Add CERT_P12 secret or upload a p12 in Codemagic UI."; exit 1; }
-    fi
+          set -euo pipefail
+          keychain initialize
+          if [ -n "${CERT_P12:-}" ]; then
+            echo "$CERT_P12" | base64 --decode > dist.p12
+            if [ -n "${CERT_PASSWORD:-}" ]; then
+              keychain add-certificates --certificate dist.p12 --certificate-password "$CERT_PASSWORD"
+            else
+              keychain add-certificates --certificate dist.p12
+            fi
+          else
+            echo "No CERT_P12 provided; trying Codemagic identities..."
+            keychain add-certificates || { echo "No certificate found. Add CERT_P12 secret or upload a p12 in Codemagic UI."; exit 1; }
+          fi
 
-    echo "== Code signing identities =="
-    security find-identity -v -p codesigning || true
+          echo "== Code signing identities =="
+          security find-identity -v -p codesigning || true
 
-    # ✅ Принимаем оба варианта названия
-    if ! security find-identity -v -p codesigning | egrep -q "Apple Distribution|iPhone Distribution"; then
-      echo "ERROR: Distribution identity not present"
-      exit 1
-    fi
+          # Принимаем оба названия: Apple Distribution / iPhone Distribution
+          if ! security find-identity -v -p codesigning | grep -E -q "Apple Distribution|iPhone Distribution"; then
+            echo "ERROR: Distribution identity not present"
+            exit 1
+          fi
 
       - name: Auto-provision profiles for the bundle id
         script: |
@@ -82,4 +82,3 @@ workflows:
         key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
         issuer_id: $APP_STORE_CONNECT_ISSUER_ID
         submit_to_testflight: true
-
