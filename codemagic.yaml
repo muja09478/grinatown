@@ -66,7 +66,6 @@ workflows:
           echo "Bundle resource id: $BUNDLE_DBID"
 
           echo "Creating/downloading App Store provisioning profile…"
-          # Попытка 1: новый синтаксис (некоторые версии CLI)
           set +e
           app-store-connect profiles create \
             --type IOS_APP_STORE \
@@ -118,38 +117,4 @@ workflows:
             <key>signingStyle</key><string>manual</string>
             <key>provisioningProfiles</key><dict>
               <key>${BUNDLE_ID}</key><string>${PROFILE_UUID}</string>
-            </dict>
-            <key>stripSwiftSymbols</key><true/>
-            <key>destination</key><string>export</string>
-          </dict></plist>
-          EOI
-          /usr/bin/plutil -lint exportOptions.plist
-
-          xcodebuild -project "$XCODE_PROJECT" -scheme "$XCODE_SCHEME" -configuration Release \
-            -archivePath "$ARCHIVE_PATH" archive \
-            DEVELOPMENT_TEAM="$TEAM_ID" \
-            CODE_SIGN_STYLE=Manual \
-            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
-            CODE_SIGN_IDENTITY="iPhone Distribution" \
-            COMPILER_INDEX_STORE_ENABLE=NO
-
-          xcodebuild -exportArchive \
-            -archivePath "$ARCHIVE_PATH" \
-            -exportOptionsPlist exportOptions.plist \
-            -exportPath "$EXPORT_PATH"
-
-          echo "Exported files:"; ls -lah "$EXPORT_PATH"
-          test -e "$EXPORT_PATH"/*.ipa
-
-    artifacts:
-      - $CM_EXPORT_DIR/*.ipa
-      - $CM_EXPORT_DIR/*.xcarchive
-      - $CM_EXPORT_DIR/*.dSYM.zip
-      - ~/Library/Logs/gym/*.log
-
-    publishing:
-      app_store_connect:
-        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
-      key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
-      issuer_id: $APP_STORE_CONNECT_ISSUER_ID
-      submit_to_testflight: true
+            </d
