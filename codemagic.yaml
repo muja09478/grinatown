@@ -1,0 +1,61 @@
+workflows:
+  ios_appstore_autosign_grainflow:
+    name: iOS App Store (Auto) – GrainFlow
+    max_build_duration: 60
+
+    environment:
+      xcode: 16.4
+      groups:
+        - appstore_connect   # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
+      vars:
+        XCODE_PROJECT: "GrainFlow.xcodeproj"
+        XCODE_WORKSPACE: "GrainFlow.xcworkspace"   # будет использован, если есть Podfile
+        XCODE_SCHEME: "GrainFlow"
+        BUNDLE_ID: "com.GrainFlow.hamzimdin"
+        EXPORT_METHOD: "app-store"
+
+    scripts:
+      - name: Install dependencies (CocoaPods if present)
+        script: |
+          set -euo pipefail
+          if [ -f "Podfile" ]; then
+            gem install cocoapods --no-document
+            pod install
+            echo 'BUILD_TARGET=--workspace "GrainFlow.xcworkspace"' >> "$CM_ENV"
+          else
+            echo 'BUILD_TARGET=--project "GrainFlow.xcodeproj"' >> "$CM_ENV"
+          fi
+
+      - name: Bump build number (avoid duplicate CFBundleVersion)
+        script: |
+          set -euo pipefail
+          agvtool new-version -all "$(date +%y%m%d%H%M)"
+
+      - name: Automatic code signing via App Store Connect
+        script: |
+          set -euo pipefail
+          keychain initialize
+          # Создаст недостающие provisioning profiles и скачает доступные distribution-сертификаты
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create --download-certificates --log-format concise
+          keychain add-certificates
+
+      - name: Build IPA (Xcode automatic signing)
+        script: |
+          set -euo pipefail
+          xcode-project build-ipa $BUILD_TARGET \
+            --scheme "$XCODE_SCHEME" \
+            --archive-flags="-destination 'generic/platform=iOS'" \
+            --export-method "$EXPORT_METHOD" \
+            --verbose
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - build/ios/xcarchive/*.xcarchive
+      - ~/Library/Logs/gym/*.log
+
+    publishing:
+      app_store_connect:
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        submit_to_testflight: true
