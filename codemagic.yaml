@@ -1,4 +1,4 @@
-wworkflows:
+ workflows:
   ios_appstore_manual_signing:
     name: iOS App Store Manual signing (GrainFlow)
     max_build_duration: 60
@@ -132,3 +132,4 @@ wworkflows:
         key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
         issuer_id: $APP_STORE_CONNECT_ISSUER_ID
         submit_to_testflight: true
+
