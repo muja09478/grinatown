@@ -31,13 +31,22 @@ workflows:
           set -euo pipefail
           agvtool new-version -all "$(date +%y%m%d%H%M)"
 
-      - name: Automatic code signing via App Store Connect
+      - name: Automatic code signing via App Store Connect (compat mode)
         script: |
           set -euo pipefail
           keychain initialize
-          # Создаст недостающие provisioning profiles и скачает доступные distribution-сертификаты
-          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create --download-certificates --log-format concise
+          # Создаст недостающие provisioning profiles для BUNDLE_ID
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create
+          # Установит доступные сертификаты в кейчейн (если они есть в аккаунте)
           keychain add-certificates
+          echo "== Code signing identities =="
+          security find-identity -v -p codesigning || true
+          # Явно подскажем, если нет ни одного дистрибутивного сертификата
+          if ! security find-identity -v -p codesigning | grep -q "Apple Distribution"; then
+            echo "ERROR: No 'Apple Distribution' certificate found in keychain."
+            echo "Create one once in Apple Developer portal (Certificates → + → Apple Distribution) and re-run."
+            exit 1
+          fi
 
       - name: Build IPA (Xcode automatic signing)
         script: |
