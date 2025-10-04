@@ -1,35 +1,71 @@
 workflows:
-  bootstrap_signing:
-    name: Bootstrap signing (create iOS Distribution p12 once)
-    max_build_duration: 10
+  ios_appstore_autosign_grainflow:
+    name: iOS App Store (Auto) – GrainFlow
+    max_build_duration: 60
+
     environment:
       xcode: 16.4
       groups:
         - appstore_connect   # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
       vars:
-        CERT_PASSWORD: "set-strong-password-here"   # после прогонa перенеси в Secrets
+        XCODE_PROJECT: "GrainFlow.xcodeproj"
+        XCODE_WORKSPACE: "GrainFlow.xcworkspace"   # будет использован, если есть Podfile
+        XCODE_SCHEME: "GrainFlow"
+        BUNDLE_ID: "com.GrainFlow.hamzimdin"
+        EXPORT_METHOD: "app-store"
+
     scripts:
-      - name: Generate PKCS#8 private key
+      - name: Install dependencies (CocoaPods if present)
         script: |
           set -euo pipefail
-          # PKCS#1 -> PKCS#8 (нужен формат с заголовком BEGIN PRIVATE KEY)
-          openssl genrsa -out dist_pkcs1.key 2048
-          openssl pkcs8 -topk8 -in dist_pkcs1.key -nocrypt -out dist.key
+          if [ -f "Podfile" ]; then
+            gem install cocoapods --no-document
+            pod install
+            echo 'BUILD_TARGET=--workspace "GrainFlow.xcworkspace"' >> "$CM_ENV"
+          else
+            echo 'BUILD_TARGET=--project "GrainFlow.xcodeproj"' >> "$CM_ENV"
+          fi
 
-      - name: Create iOS Distribution cert and package into p12
+      - name: Bump build number (avoid duplicate CFBundleVersion)
         script: |
           set -euo pipefail
-          app-store-connect certificates create \
-            --type IOS_DISTRIBUTION \
-            --certificate-key "$(cat dist.key)" \
-            --p12-password "$CERT_PASSWORD" \
-            --p12-path dist.p12 \
-            --save
+          agvtool new-version -all "$(date +%y%m%d%H%M)"
 
-      - name: Prepare artifact for Secrets (base64)
+      - name: Automatic code signing via App Store Connect (compat mode)
         script: |
           set -euo pipefail
-          base64 < dist.p12 > dist.p12.b64
+          keychain initialize
+          # Создаст недостающие provisioning profiles для BUNDLE_ID
+          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create
+          # Установит доступные сертификаты в кейчейн (если они есть в аккаунте)
+          keychain add-certificates
+          echo "== Code signing identities =="
+          security find-identity -v -p codesigning || true
+          # Явно подскажем, если нет ни одного дистрибутивного сертификата
+          if ! security find-identity -v -p codesigning | grep -q "Apple Distribution"; then
+            echo "ERROR: No 'Apple Distribution' certificate found in keychain."
+            echo "Create one once in Apple Developer portal (Certificates → + → Apple Distribution) and re-run."
+            exit 1
+          fi
+
+      - name: Build IPA (Xcode automatic signing)
+        script: |
+          set -euo pipefail
+          xcode-project build-ipa $BUILD_TARGET \
+            --scheme "$XCODE_SCHEME" \
+            --archive-flags="-destination 'generic/platform=iOS'" \
+            --export-method "$EXPORT_METHOD" \
+            --verbose
+
     artifacts:
-      - dist.p12.b64
+      - build/ios/ipa/*.ipa
+      - build/ios/xcarchive/*.xcarchive
+      - ~/Library/Logs/gym/*.log
+
+    publishing:
+      app_store_connect:
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        submit_to_testflight: true
 
