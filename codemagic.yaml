@@ -1,6 +1,6 @@
 workflows:
   ios_appstore_autosign_grainflow:
-    name: iOS App Store – GrainFlow (manual profile)
+    name: iOS App Store – GrainFlow
     max_build_duration: 60
 
     environment:
@@ -9,24 +9,20 @@ workflows:
         - appstore_connect
         - signing
       vars:
-        XCODE_PROJECT: "GrainFlow.xcodeproj"
-        XCODE_WORKSPACE: "GrainFlow.xcworkspace"
         XCODE_SCHEME: "GrainFlow"
         BUNDLE_ID: "com.GrainFlow.hamzimdin"
         EXPORT_METHOD: "app-store"
 
     scripts:
-      - name: Install dependencies (CocoaPods if present)
+      - name: Install dependencies
         script: |
           set -euo pipefail
           if [ -f "Podfile" ]; then
             echo "Installing CocoaPods dependencies..."
             gem install cocoapods --no-document
             pod install
-            echo "BUILD_TARGET=--workspace \"GrainFlow.xcworkspace\"" >> "$CM_ENV"
             echo "Using workspace for build"
           else
-            echo "BUILD_TARGET=--project \"GrainFlow.xcodeproj\"" >> "$CM_ENV"
             echo "Using project for build"
           fi
 
@@ -46,7 +42,7 @@ workflows:
             keychain add-certificates --certificate dist.p12
           fi
           echo "== Code signing identities =="
-          security find-identity -v -p codesigning || true
+          security find-identity -v -p codesigning
           security find-identity -v -p codesigning | grep -E -q "Apple Distribution|iPhone Distribution" \
             || { echo "ERROR: distribution identity not found in keychain"; exit 1; }
 
@@ -54,50 +50,45 @@ workflows:
         script: |
           set -euo pipefail
           
-          # Загружаем переменные из предыдущих шагов
-          if [ -f "$CM_ENV" ]; then
-            source "$CM_ENV"
+          echo "Current directory: $(pwd)"
+          echo "Directory contents:"
+          ls -la
+          
+          # Определяем тип проекта
+          if [ -f "Podfile" ] && [ -d "GrainFlow.xcworkspace" ]; then
+            echo "Building with workspace..."
+            xcode-project build-archive \
+              --workspace "GrainFlow.xcworkspace" \
+              --scheme "$XCODE_SCHEME" \
+              --output "build/GrainFlow.xcarchive"
+          elif [ -d "GrainFlow.xcodeproj" ]; then
+            echo "Building with project..."
+            xcode-project build-archive \
+              --project "GrainFlow.xcodeproj" \
+              --scheme "$XCODE_SCHEME" \
+              --output "build/GrainFlow.xcarchive"
+          else
+            echo "ERROR: No project or workspace found!"
+            echo "Available files:"
+            find . -name "*.xcodeproj" -o -name "*.xcworkspace" | head -10
+            exit 1
           fi
-          
-          # Проверяем, установлена ли переменная BUILD_TARGET
-          if [ -z "${BUILD_TARGET:-}" ]; then
-            echo "BUILD_TARGET not set, determining automatically..."
-            if [ -f "Podfile" ] && [ -d "$XCODE_WORKSPACE" ]; then
-              BUILD_TARGET="--workspace \"$XCODE_WORKSPACE\""
-              echo "Using workspace: $BUILD_TARGET"
-            else
-              BUILD_TARGET="--project \"$XCODE_PROJECT\""
-              echo "Using project: $BUILD_TARGET"
-            fi
-          fi
-          
-          echo "Building with target: $BUILD_TARGET"
-          echo "Scheme: $XCODE_SCHEME"
-          
-          # Создаем директорию для сборки
-          mkdir -p "$CM_BUILD_DIR/build"
-          
-          # Сборка архива
-          eval "xcode-project build-archive \
-            $BUILD_TARGET \
-            --scheme \"$XCODE_SCHEME\" \
-            --output \"$CM_BUILD_DIR/build/$XCODE_SCHEME.xcarchive\""
           
           # Экспорт IPA
           xcode-project export-archive \
-            --archive-path "$CM_BUILD_DIR/build/$XCODE_SCHEME.xcarchive" \
-            --output "$CM_BUILD_DIR/build" \
+            --archive-path "build/GrainFlow.xcarchive" \
+            --output "build" \
             --export-method "$EXPORT_METHOD"
 
       - name: Deploy to App Store Connect
         script: |
           set -euo pipefail
-          IPA_PATH=$(find "$CM_BUILD_DIR/build" -name "*.ipa" | head -1)
-          [ -n "$IPA_PATH" ] || { echo "No .ipa found in build dir"; exit 1; }
+          IPA_PATH=$(find "build" -name "*.ipa" | head -1)
+          if [ -z "$IPA_PATH" ]; then
+            echo "No .ipa file found!"
+            echo "Build directory contents:"
+            find "build" -type f
+            exit 1
+          fi
           echo "Found IPA: $IPA_PATH"
-          
-          echo "Available apps in App Store Connect:"
-          app-store-connect apps list --json
-          
-          echo "Uploading to App Store Connect..."
           app-store-connect upload "$IPA_PATH"
