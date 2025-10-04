@@ -1,95 +1,118 @@
 workflows:
-  ios_appstore_autosign_grainflow:
-    name: iOS App Store – GrainFlow
+  ios_appstore_manual_signing:
+    name: iOS App Store Manual signing
     max_build_duration: 60
 
     environment:
-      xcode: 16.4
       groups:
-        - appstore_connect
-        - signing
+        - signing            # CERTIFICATE_P12, CERTIFICATE_PASSWORD, MOBILEPROVISION
+        - appstore_connect   # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
       vars:
+        XCODE_PROJECT: "GrainFlow.xcodeproj"
         XCODE_SCHEME: "GrainFlow"
         BUNDLE_ID: "com.GrainFlow.hamzimdin"
+        TEAM_ID: "OVERRIDE_BY_PROFILE"   # будет заменён на значение из профиля
         EXPORT_METHOD: "app-store"
 
     scripts:
-      - name: Install dependencies
+      - name: Import certificate and profile
         script: |
           set -euo pipefail
-          if [ -f "Podfile" ]; then
-            echo "Installing CocoaPods dependencies..."
-            gem install cocoapods --no-document
-            pod install
-            echo "Using workspace for build"
-          else
-            echo "Using project for build"
-          fi
 
-      - name: Bump build number
-        script: |
-          set -euo pipefail
-          agvtool new-version -all "$(date +%y%m%d%H%M)"
+          echo "$CERTIFICATE_P12" | base64 --decode > cert.p12
+          echo "$MOBILEPROVISION" | base64 --decode > profile.mobileprovision
 
-      - name: Import Distribution p12 into keychain
-        script: |
-          set -euo pipefail
+          # Keychain + certificate
           keychain initialize
-          echo "$CERT_P12" | base64 --decode > dist.p12
-          if [ -n "${CERT_PASSWORD:-}" ]; then
-            keychain add-certificates --certificate dist.p12 --certificate-password "$CERT_PASSWORD"
+          if [ -n "${CERTIFICATE_PASSWORD:-}" ]; then
+            keychain add-certificates --certificate cert.p12 --certificate-password "$CERTIFICATE_PASSWORD"
           else
-            keychain add-certificates --certificate dist.p12
+            keychain add-certificates --certificate cert.p12
           fi
-          echo "== Code signing identities =="
-          security find-identity -v -p codesigning
-          security find-identity -v -p codesigning | grep -E -q "Apple Distribution|iPhone Distribution" \
-            || { echo "ERROR: distribution identity not found in keychain"; exit 1; }
 
-      - name: Build and export .ipa
+          # Install provisioning profile and read UUID + TeamIdentifier
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILE_PLIST="$(security cms -D -i profile.mobileprovision)"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' /dev/stdin <<< "$PROFILE_PLIST")
+          PROFILE_TEAM_ID=$(/usr/libexec/PlistBuddy -c 'Print TeamIdentifier:0' /dev/stdin <<< "$PROFILE_PLIST")
+
+          cp profile.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          echo "Using Provisioning Profile UUID: $PROFILE_UUID"
+          echo "TeamIdentifier from profile: $PROFILE_TEAM_ID"
+
+          # export to env for next steps
+          echo "PROFILE_UUID=$PROFILE_UUID" >> "$CM_ENV"
+          echo "TEAM_ID=$PROFILE_TEAM_ID"   >> "$CM_ENV"
+
+          # Diagnostics (не ломают билд)
+          echo "== Code signing identities in keychain =="
+          security find-identity -v -p codesigning || true
+
+          # Valid exportOptions.plist (XML)
+          cat > exportOptions.plist <<EOI
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>${EXPORT_METHOD}</string>
+            <key>teamID</key><string>${TEAM_ID}</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${BUNDLE_ID}</key><string>${PROFILE_UUID}</string>
+            </dict>
+            <key>compileBitcode</key><false/>
+            <key>stripSwiftSymbols</key><true/>
+            <key>destination</key><string>export</string>
+          </dict>
+          </plist>
+          EOI
+          /usr/bin/plutil -lint exportOptions.plist
+
+          # Apply profile into the project for manual signing
+          xcode-project use-profiles --project "$XCODE_PROJECT" --export-options-plist exportOptions.plist
+
+      - name: Archive and export IPA (xcodebuild)
         script: |
           set -euo pipefail
-          
-          echo "Current directory: $(pwd)"
-          echo "Directory contents:"
-          ls -la
-          
-          # Определяем тип проекта и собираем IPA
-          if [ -f "Podfile" ] && [ -d "GrainFlow.xcworkspace" ]; then
-            echo "Building with workspace..."
-            xcode-project build-ipa \
-              --workspace "GrainFlow.xcworkspace" \
-              --scheme "$XCODE_SCHEME" \
-              --output "build" \
-              --export-method "$EXPORT_METHOD"
-          elif [ -d "GrainFlow.xcodeproj" ]; then
-            echo "Building with project..."
-            xcode-project build-ipa \
-              --project "GrainFlow.xcodeproj" \
-              --scheme "$XCODE_SCHEME" \
-              --output "build" \
-              --export-method "$EXPORT_METHOD"
-          else
-            echo "ERROR: No project or workspace found!"
-            echo "Available files:"
-            find . -name "*.xcodeproj" -o -name "*.xcworkspace" | head -10
-            exit 1
-          fi
-          
-          echo "Build completed successfully!"
-          echo "Build directory contents:"
-          find "build" -type f
 
-      - name: Deploy to App Store Connect
-        script: |
-          set -euo pipefail
-          IPA_PATH=$(find "build" -name "*.ipa" | head -1)
-          if [ -z "$IPA_PATH" ]; then
-            echo "No .ipa file found!"
-            echo "Build directory contents:"
-            find "build" -type f
-            exit 1
-          fi
-          echo "Found IPA: $IPA_PATH"
-          echo "Uploading to App Store Connect..."
-          app-store-connect upload "$IPA_PATH"
+          ARCHIVE_PATH="$CM_BUILD_DIR/Trackify.xcarchive"
+          EXPORT_PATH="$CM_EXPORT_DIR"
+
+          echo "Archiving to: $ARCHIVE_PATH"
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -archivePath "$ARCHIVE_PATH" \
+            archive \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            COMPILER_INDEX_STORE_ENABLE=NO
+
+
+echo "Exporting IPA to: $EXPORT_PATH"
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportOptionsPlist exportOptions.plist \
+            -exportPath "$EXPORT_PATH"
+
+          echo "Export dir listing:"
+          ls -lah "$EXPORT_PATH" || true
+
+          # Упадём явно, если .ipa не создана (чтобы не было 'No artifacts were found')
+          test -e "$EXPORT_PATH"/*.ipa
+
+    artifacts:
+      - $CM_EXPORT_DIR/*.ipa
+      - $CM_EXPORT_DIR/*.dSYM.zip
+      - $CM_EXPORT_DIR/*.xcarchive
+
+    publishing:
+      app_store_connect:
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        submit_to_testflight: true
