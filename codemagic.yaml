@@ -52,23 +52,13 @@ workflows:
           PROFILES_DIR="$CM_BUILD_DIR/profiles"
           mkdir -p "$PROFILES_DIR"
 
-          echo "Fetching an IOS_DISTRIBUTION certificate id from the portal…"
-          CERT_ID=$(app-store-connect certificates list --type IOS_DISTRIBUTION --json | python3 - <<'PY'
-import json,sys
-data=json.load(sys.stdin)
-for c in data.get("data",[]):
-    a=c.get("attributes",{})
-    if a.get("certificateType")=="IOS_DISTRIBUTION":
-        print(c["id"]); break
-PY
-)
-          if [ -z "${CERT_ID:-}" ]; then
-            echo "No IOS_DISTRIBUTION certificate found in portal. Make sure bootstrap created it."; exit 1
-          fi
-          echo "Using certificate id: $CERT_ID"
+          # Возьмём id активного IOS_DISTRIBUTION-сертификата из портала
+          CERT_ID=$(app-store-connect certificates list --type IOS_DISTRIBUTION --json \
+            | python3 -c 'import sys,json; d=json.load(sys.stdin); print(next((c["id"] for c in d.get("data",[]) if c.get("attributes",{}).get("certificateType")=="IOS_DISTRIBUTION"), ""), end="")')
+          [ -n "$CERT_ID" ] || { echo "No IOS_DISTRIBUTION certificate found in portal"; exit 1; }
+          echo "Using cert id: $CERT_ID"
 
-          echo "Creating/downloading provisioning profile for ${BUNDLE_ID}…"
-          # создаст, если нет; если есть — скачает
+          # Создаст профиль для BUNDLE_ID (если нет) или скачает существующий
           app-store-connect profiles create \
             --type IOS_APP_STORE \
             --bundle-id "$BUNDLE_ID" \
@@ -82,61 +72,5 @@ PY
           PL=$(/usr/bin/security cms -D -i "$PROFILE_PATH")
           UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' /dev/stdin <<< "$PL")
           TEAM_ID=$(/usr/libexec/PlistBuddy -c 'Print TeamIdentifier:0' /dev/stdin <<< "$PL")
-
           echo "PROFILE_UUID=$UUID" >> "$CM_ENV"
-          echo "TEAM_ID=$TEAM_ID"   >> "$CM_ENV"
-          echo "Using profile UUID: $UUID, team: $TEAM_ID"
-
-          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
-          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
-
-      - name: Build IPA (manual signing, stable)
-        script: |
-          set -euo pipefail
-          ARCHIVE_PATH="$CM_BUILD_DIR/GrainFlow.xcarchive"
-          EXPORT_PATH="$CM_EXPORT_DIR"
-
-          cat > exportOptions.plist <<EOI
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-            <key>method</key><string>${EXPORT_METHOD}</string>
-            <key>teamID</key><string>${TEAM_ID}</string>
-            <key>signingStyle</key><string>manual</string>
-            <key>provisioningProfiles</key><dict>
-              <key>${BUNDLE_ID}</key><string>${PROFILE_UUID}</string>
-            </dict>
-            <key>stripSwiftSymbols</key><true/>
-            <key>destination</key><string>export</string>
-          </dict></plist>
-          EOI
-          /usr/bin/plutil -lint exportOptions.plist
-
-          xcodebuild -project "$XCODE_PROJECT" -scheme "$XCODE_SCHEME" -configuration Release \
-            -archivePath "$ARCHIVE_PATH" archive \
-            DEVELOPMENT_TEAM="$TEAM_ID" \
-            CODE_SIGN_STYLE=Manual \
-            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
-            CODE_SIGN_IDENTITY="iPhone Distribution" \
-            COMPILER_INDEX_STORE_ENABLE=NO
-
-          xcodebuild -exportArchive \
-            -archivePath "$ARCHIVE_PATH" \
-            -exportOptionsPlist exportOptions.plist \
-            -exportPath "$EXPORT_PATH"
-
-          echo "Exported files:"; ls -lah "$EXPORT_PATH"
-          test -e "$EXPORT_PATH"/*.ipa
-
-    artifacts:
-      - $CM_EXPORT_DIR/*.ipa
-      - $CM_EXPORT_DIR/*.xcarchive
-      - $CM_EXPORT_DIR/*.dSYM.zip
-      - ~/Library/Logs/gym/*.log
-
-    publishing:
-      app_store_connect:
-        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
-        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
-        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
-        submit_to_testflight: true
+          echo "TEAM_ID=$TEAM_ID"
