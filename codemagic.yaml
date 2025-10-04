@@ -6,11 +6,11 @@ workflows:
     environment:
       xcode: 16.4
       groups:
-        - appstore_connect      # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
-        - signing               # CERT_P12 (+ CERT_PASSWORD если есть)
+        - appstore_connect
+        - signing
       vars:
         XCODE_PROJECT: "GrainFlow.xcodeproj"
-        XCODE_WORKSPACE: "GrainFlow.xcworkspace"   # используется, если есть Podfile
+        XCODE_WORKSPACE: "GrainFlow.xcworkspace"
         XCODE_SCHEME: "GrainFlow"
         BUNDLE_ID: "com.GrainFlow.hamzimdin"
         EXPORT_METHOD: "app-store"
@@ -60,17 +60,17 @@ workflows:
             *) echo "Certificates list not JSON, got:"; echo "$CERTS_JSON"; exit 1 ;;
           esac
           CERT_ID=$(printf '%s' "$CERTS_JSON" | python3 -c 'import sys,json
-d=json.load(sys.stdin)
-items=d["data"] if isinstance(d,dict) and "data" in d else (d if isinstance(d,list) else [])
-cid=""
-for c in items:
-    if not isinstance(c,dict): continue
-    a=c.get("attributes",{}) or {}
-    t=(a.get("certificateType") or c.get("certificateType") or "").upper()
-    if "DISTRIBUTION" in t:
-        cid=c.get("id") or ""
-        if cid: break
-print(cid,end="")')
+          d=json.load(sys.stdin)
+          items=d["data"] if isinstance(d,dict) and "data" in d else (d if isinstance(d,list) else [])
+          cid=""
+          for c in items:
+              if not isinstance(c,dict): continue
+              a=c.get("attributes",{}) or {}
+              t=(a.get("certificateType") or c.get("certificateType") or "").upper()
+              if "DISTRIBUTION" in t:
+                  cid=c.get("id") or ""
+                  if cid: break
+          print(cid,end="")')
           [ -n "$CERT_ID" ] || { echo "Could not obtain IOS_DISTRIBUTION cert id from portal"; exit 1; }
           echo "Using cert id: $CERT_ID"
 
@@ -81,10 +81,38 @@ print(cid,end="")')
             *) echo "Bundle-ids list not JSON, got:"; echo "$BUNDLES_JSON"; exit 1 ;;
           esac
           BUNDLE_DBID=$(printf '%s' "$BUNDLES_JSON" | BUNDLE_ID="$BUNDLE_ID" python3 -c 'import sys,os,json
-bid=os.environ.get("BUNDLE_ID"); d=json.load(sys.stdin)
-items=d["data"] if isinstance(d,dict) and "data" in d else (d if isinstance(d,list) else [])
-rid=""
-for x in items:
-    if not isinstance(x,dict): continue
-    a=x.get("attributes",{}) or {}
-    ident=a.get("identifier") or x.get("identifier") or ""
+          bid=os.environ.get("BUNDLE_ID")
+          d=json.load(sys.stdin)
+          items=d["data"] if isinstance(d,dict) and "data" in d else (d if isinstance(d,list) else [])
+          rid=""
+          for x in items:
+              if not isinstance(x,dict): continue
+              a=x.get("attributes",{}) or {}
+              ident=a.get("identifier") or x.get("identifier") or ""
+              if ident == bid:
+                  rid=x.get("id") or ""
+                  if rid: break
+          print(rid,end="")')
+          [ -n "$BUNDLE_DBID" ] || { echo "Could not find Bundle ID $BUNDLE_ID in portal"; exit 1; }
+          echo "Bundle ID resource id: $BUNDLE_DBID"
+
+      - name: Build and export .ipa
+        script: |
+          set -euo pipefail
+          source "$CM_ENV"
+          xcode-project build-archive \
+            $BUILD_TARGET \
+            --scheme "$XCODE_SCHEME" \
+            --output "$CM_BUILD_DIR/build/$XCODE_SCHEME.xcarchive"
+          xcode-project export-archive \
+            --archive-path "$CM_BUILD_DIR/build/$XCODE_SCHEME.xcarchive" \
+            --output "$CM_BUILD_DIR/build" \
+            --export-method "$EXPORT_METHOD"
+
+      - name: Deploy to App Store Connect
+        script: |
+          set -euo pipefail
+          IPA_PATH=$(find "$CM_BUILD_DIR/build" -name "*.ipa" | head -1)
+          [ -n "$IPA_PATH" ] || { echo "No .ipa found in build dir"; exit 1; }
+          app-store-connect apps list --json
+          app-store-connect upload "$IPA_PATH"
