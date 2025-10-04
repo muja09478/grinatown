@@ -1,4 +1,4 @@
- workflows:
+workflows:
   ios_appstore_manual_signing:
     name: iOS App Store Manual signing (GrainFlow)
     max_build_duration: 60
@@ -6,13 +6,13 @@
     environment:
       xcode: 16.4
       groups:
-        - signing            # CERTIFICATE_P12, CERTIFICATE_PASSWORD (optional), MOBILEPROVISION (base64)
+        - signing            # см. ниже про переменные
         - appstore_connect   # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
       vars:
         XCODE_PROJECT: "GrainFlow.xcodeproj"
         XCODE_SCHEME: "GrainFlow"
         BUNDLE_ID: "com.GrainFlow.hamzimdin"
-        TEAM_ID: "OVERRIDE_BY_PROFILE"   # будет заменён значением из профиля
+        TEAM_ID: "OVERRIDE_BY_PROFILE"
         EXPORT_METHOD: "app-store"
 
     scripts:
@@ -28,19 +28,28 @@
         script: |
           set -euo pipefail
 
-          # Секреты -> файлы
-          echo "$CERTIFICATE_P12" | base64 --decode > cert.p12
-          echo "$MOBILEPROVISION" | base64 --decode > profile.mobileprovision
+          # --- Подхватываем секреты с разными именами (оба варианта поддержаны) ---
+          CERT_P12_B64="${CERTIFICATE_P12:-${CERT_P12:-}}"
+          CERT_PWD="${CERTIFICATE_PASSWORD:-${CERT_PASSWORD:-}}"
+          PROFILE_B64="${MOBILEPROVISION:-${PROFILE_MOBILEPROVISION:-}}"
 
-          # Кейчейн + p12
+          # Проверки с понятными сообщениями
+          [ -n "$CERT_P12_B64" ] || { echo "❌ Missing CERTIFICATE_P12 (или CERT_P12) в группе 'signing' — это base64 вашего .p12"; exit 1; }
+          [ -n "$PROFILE_B64" ]  || { echo "❌ Missing MOBILEPROVISION (или PROFILE_MOBILEPROVISION) — это base64 вашего .mobileprovision (App Store)"; exit 1; }
+
+          # Files from secrets
+          echo "$CERT_P12_B64" | base64 --decode > cert.p12
+          echo "$PROFILE_B64"  | base64 --decode > profile.mobileprovision
+
+          # Keychain + certificate
           keychain initialize
-          if [ -n "${CERTIFICATE_PASSWORD:-}" ]; then
-            keychain add-certificates --certificate cert.p12 --certificate-password "$CERTIFICATE_PASSWORD"
+          if [ -n "$CERT_PWD" ]; then
+            keychain add-certificates --certificate cert.p12 --certificate-password "$CERT_PWD"
           else
             keychain add-certificates --certificate cert.p12
           fi
 
-          # Ставим профиль, читаем UUID и TeamIdentifier
+          # Install profile and extract UUID + TeamIdentifier
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
           PROFILE_PLIST="$(security cms -D -i profile.mobileprovision)"
           PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' /dev/stdin <<< "$PROFILE_PLIST")
@@ -50,23 +59,24 @@
           echo "Using Provisioning Profile UUID: $PROFILE_UUID"
           echo "TeamIdentifier from profile: $PROFILE_TEAM_ID"
 
-          # Экспортим для следующих шагов
+          # export to env for next steps
           echo "PROFILE_UUID=$PROFILE_UUID" >> "$CM_ENV"
           echo "TEAM_ID=$PROFILE_TEAM_ID"   >> "$CM_ENV"
 
-          # Определим корректное имя сертификата подписи (Apple Distribution или iPhone Distribution)
-          DIST_IDENTITY=$(security find-identity -v -p codesigning | \
-            sed -nE 's/.*"((Apple|iPhone) Distribution:.*)"/\1/p' | head -n1 || true)
+          # Resolve correct signing identity (Apple Distribution или iPhone Distribution)
+          DIST_IDENTITY=$(security find-identity -v -p codesigning | sed -nE 's/.*"((Apple|iPhone) Distribution:.*)"/\1/p' | head -n1 || true)
           if [ -z "$DIST_IDENTITY" ]; then
-            echo "ERROR: Distribution identity not found in keychain"; security find-identity -v -p codesigning || true; exit 1
+            echo "❌ Distribution identity not found in keychain"
+            security find-identity -v -p codesigning || true
+            exit 1
           fi
           echo "DIST_IDENTITY=$DIST_IDENTITY" >> "$CM_ENV"
           echo "Using signing identity: $DIST_IDENTITY"
 
-          # Диагностика (не ломает билд)
+          # Diagnostics
           echo "== Code signing identities in keychain =="; security find-identity -v -p codesigning || true
 
-          # Готовим exportOptions.plist (manual)
+          # exportOptions.plist (manual)
           cat > exportOptions.plist <<EOI
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -86,7 +96,7 @@
           EOI
           /usr/bin/plutil -lint exportOptions.plist
 
-          # Прописать профиль в проект (manual signing)
+          # Apply profile into the project (manual signing)
           xcode-project use-profiles --project "$XCODE_PROJECT" --export-options-plist exportOptions.plist
 
       - name: Archive and export IPA (xcodebuild, manual signing)
@@ -118,7 +128,7 @@
           echo "Export dir listing:"
           ls -lah "$EXPORT_PATH" || true
 
-          # Упадём явно, если .ipa не создана
+          # Fail if no .ipa to avoid 'No artifacts were found'
           test -e "$EXPORT_PATH"/*.ipa
 
     artifacts:
@@ -132,4 +142,3 @@
         key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
         issuer_id: $APP_STORE_CONNECT_ISSUER_ID
         submit_to_testflight: true
-
