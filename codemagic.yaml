@@ -1,12 +1,12 @@
 workflows:
   ios_appstore_autosign_grainflow:
-    name: iOS App Store (Auto) – GrainFlow
+    name: iOS App Store – GrainFlow (manual profile)
     max_build_duration: 60
 
     environment:
       xcode: 16.4
       groups:
-        - appstore_connect      # ISSUER_ID, KEY_IDENTIFIER, PRIVATE_KEY
+        - appstore_connect      # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
         - signing               # CERT_P12 (+ CERT_PASSWORD если есть)
       vars:
         XCODE_PROJECT: "GrainFlow.xcodeproj"
@@ -27,7 +27,7 @@ workflows:
             echo 'BUILD_TARGET=--project "GrainFlow.xcodeproj"' >> "$CM_ENV"
           fi
 
-      - name: Bump build number (avoid duplicate CFBundleVersion)
+      - name: Bump build number
         script: |
           set -euo pipefail
           agvtool new-version -all "$(date +%y%m%d%H%M)"
@@ -36,44 +36,102 @@ workflows:
         script: |
           set -euo pipefail
           keychain initialize
-          if [ -n "${CERT_P12:-}" ]; then
-            echo "$CERT_P12" | base64 --decode > dist.p12
-            if [ -n "${CERT_PASSWORD:-}" ]; then
-              keychain add-certificates --certificate dist.p12 --certificate-password "$CERT_PASSWORD"
-            else
-              keychain add-certificates --certificate dist.p12
-            fi
+          echo "$CERT_P12" | base64 --decode > dist.p12
+          if [ -n "${CERT_PASSWORD:-}" ]; then
+            keychain add-certificates --certificate dist.p12 --certificate-password "$CERT_PASSWORD"
           else
-            echo "No CERT_P12 provided; trying Codemagic identities..."
-            keychain add-certificates || { echo "No certificate found. Add CERT_P12 secret or upload a p12 in Codemagic UI."; exit 1; }
+            keychain add-certificates --certificate dist.p12
           fi
-
           echo "== Code signing identities =="
           security find-identity -v -p codesigning || true
+          security find-identity -v -p codesigning | grep -E -q "Apple Distribution|iPhone Distribution" || { echo "ERROR: distribution identity not found"; exit 1; }
 
-          # Принимаем оба названия: Apple Distribution / iPhone Distribution
-          if ! security find-identity -v -p codesigning | grep -E -q "Apple Distribution|iPhone Distribution"; then
-            echo "ERROR: Distribution identity not present"
-            exit 1
+      - name: Ensure App Store provisioning profile for bundle id
+        script: |
+          set -euo pipefail
+          PROFILES_DIR="$CM_BUILD_DIR/profiles"
+          mkdir -p "$PROFILES_DIR"
+
+          echo "Fetching an IOS_DISTRIBUTION certificate id from the portal…"
+          CERT_ID=$(app-store-connect certificates list --type IOS_DISTRIBUTION --json | python3 - <<'PY'
+import json,sys
+data=json.load(sys.stdin)
+for c in data.get("data",[]):
+    a=c.get("attributes",{})
+    if a.get("certificateType")=="IOS_DISTRIBUTION":
+        print(c["id"]); break
+PY
+)
+          if [ -z "${CERT_ID:-}" ]; then
+            echo "No IOS_DISTRIBUTION certificate found in portal. Make sure bootstrap created it."; exit 1
           fi
+          echo "Using certificate id: $CERT_ID"
 
-      - name: Auto-provision profiles for the bundle id
+          echo "Creating/downloading provisioning profile for ${BUNDLE_ID}…"
+          # создаст, если нет; если есть — скачает
+          app-store-connect profiles create \
+            --type IOS_APP_STORE \
+            --bundle-id "$BUNDLE_ID" \
+            --certificate-ids "$CERT_ID" \
+            --save \
+            --profiles-dir "$PROFILES_DIR" || true
+
+          PROFILE_PATH=$(ls -t "$PROFILES_DIR"/*.mobileprovision | head -n1)
+          test -s "$PROFILE_PATH"
+
+          PL=$(/usr/bin/security cms -D -i "$PROFILE_PATH")
+          UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' /dev/stdin <<< "$PL")
+          TEAM_ID=$(/usr/libexec/PlistBuddy -c 'Print TeamIdentifier:0' /dev/stdin <<< "$PL")
+
+          echo "PROFILE_UUID=$UUID" >> "$CM_ENV"
+          echo "TEAM_ID=$TEAM_ID"   >> "$CM_ENV"
+          echo "Using profile UUID: $UUID, team: $TEAM_ID"
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
+
+      - name: Build IPA (manual signing, stable)
         script: |
           set -euo pipefail
-          app-store-connect fetch-signing-files "$BUNDLE_ID" --type IOS_APP_STORE --create
+          ARCHIVE_PATH="$CM_BUILD_DIR/GrainFlow.xcarchive"
+          EXPORT_PATH="$CM_EXPORT_DIR"
 
-      - name: Build IPA (Xcode automatic signing)
-        script: |
-          set -euo pipefail
-          xcode-project build-ipa $BUILD_TARGET \
-            --scheme "$XCODE_SCHEME" \
-            --archive-flags="-destination 'generic/platform=iOS'" \
-            --export-method "$EXPORT_METHOD" \
-            --verbose
+          cat > exportOptions.plist <<EOI
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>${EXPORT_METHOD}</string>
+            <key>teamID</key><string>${TEAM_ID}</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>provisioningProfiles</key><dict>
+              <key>${BUNDLE_ID}</key><string>${PROFILE_UUID}</string>
+            </dict>
+            <key>stripSwiftSymbols</key><true/>
+            <key>destination</key><string>export</string>
+          </dict></plist>
+          EOI
+          /usr/bin/plutil -lint exportOptions.plist
+
+          xcodebuild -project "$XCODE_PROJECT" -scheme "$XCODE_SCHEME" -configuration Release \
+            -archivePath "$ARCHIVE_PATH" archive \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
+            CODE_SIGN_IDENTITY="iPhone Distribution" \
+            COMPILER_INDEX_STORE_ENABLE=NO
+
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportOptionsPlist exportOptions.plist \
+            -exportPath "$EXPORT_PATH"
+
+          echo "Exported files:"; ls -lah "$EXPORT_PATH"
+          test -e "$EXPORT_PATH"/*.ipa
 
     artifacts:
-      - build/ios/ipa/*.ipa
-      - build/ios/xcarchive/*.xcarchive
+      - $CM_EXPORT_DIR/*.ipa
+      - $CM_EXPORT_DIR/*.xcarchive
+      - $CM_EXPORT_DIR/*.dSYM.zip
       - ~/Library/Logs/gym/*.log
 
     publishing:
