@@ -18,8 +18,8 @@ workflows:
         # APP_BUILD: "123"                    # ← опционально, если хочешь задать build вручную (иначе timestamp)
 
     - name: Import certificate and provisioning profile
-        script: |
-          set -euo pipefail
+      script: |
+        set -euo pipefail
 
           # --- Подхватываем секреты с разными именами (оба варианта поддержаны) ---
           CERT_P12_B64="${CERTIFICATE_P12:-${CERT_P12:-}}"
@@ -155,5 +155,6 @@ workflows:
         key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
         issuer_id: $APP_STORE_CONNECT_ISSUER_ID
         submit_to_testflight: true
+
 
 
