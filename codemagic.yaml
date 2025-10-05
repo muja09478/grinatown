@@ -1,3 +1,4 @@
+
 workflows:
   ios_appstore_manual_signing:
     name: iOS App Store Manual signing
@@ -86,8 +87,7 @@ workflows:
 
       - name: "Archive and export IPA (xcodebuild)"
         script: |
-          set -euo pipefail
-          ARCHIVE_PATH="$CM_BUILD_DIR/GrainFlow.xcarchive"
+          ARCHIVE_PATH="$CM_BUILD_DIR/Trackify.xcarchive"
           EXPORT_PATH="$CM_EXPORT_DIR"
 
           # Доп. флаги версий прямо в xcodebuild (работает без Info.plist)
@@ -131,3 +131,4 @@ workflows:
         key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
         issuer_id: $APP_STORE_CONNECT_ISSUER_ID
         submit_to_testflight: true
+
